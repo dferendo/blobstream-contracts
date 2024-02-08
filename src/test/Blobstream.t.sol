@@ -8,7 +8,7 @@ import "../DataRootTuple.sol";
 import "../Blobstream.sol";
 import "../lib/tree/binary/BinaryMerkleProof.sol";
 
-import "ds-test/test.sol";
+import "forge-std/Test.sol";
 
 interface CheatCodes {
     function addr(uint256 privateKey) external returns (address);
@@ -16,7 +16,7 @@ interface CheatCodes {
     function sign(uint256 privateKey, bytes32 digest) external returns (uint8 v, bytes32 r, bytes32 s);
 }
 
-contract RelayerTest is DSTest {
+contract RelayerTest is Test {
     // Private keys used for test signatures.
     uint256 constant testPriv1 = 0x64a1d6f0e760a8d62b4afdde4096f16f51b401eaaecc915740f71770ea76a8ad;
     uint256 constant testPriv2 = 0x6e8bdfa979ab645b41c4d17cb1329b2a44684c82b61b1b060ea9b6e1c927a4f4;
@@ -121,11 +121,10 @@ contract RelayerTest is DSTest {
     /*
     the values used in the verify attestation test are in the format `<height padded to 32 bytes || data root>`, which
     represent an encoded `abi.encode(DataRootTuple)`:
-
-    0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-    0x00000000000000000000000000000000000000000000000000000000000000010101010101010101010101010101010101010101010101010101010101010101
-    0x00000000000000000000000000000000000000000000000000000000000000020202020202020202020202020202020202020202020202020202020202020202
-    0x00000000000000000000000000000000000000000000000000000000000000030303030303030303030303030303030303030303030303030303030303030303
+    0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000
+    0x0000000000000000000000000000000000000000000000000000000000000001 0x0101010101010101010101010101010101010101010101010101010101010101
+    0x0000000000000000000000000000000000000000000000000000000000000002 0x0202020202020202020202020202020202020202020202020202020202020202
+    0x0000000000000000000000000000000000000000000000000000000000000003 0x0303030303030303030303030303030303030303030303030303030303030303
     */
     function testVerifyAttestation() public {
         uint256 initialVelsetNonce = 1;
@@ -173,6 +172,57 @@ contract RelayerTest is DSTest {
         assertTrue(committedTo);
     }
 
+    function testVerification() public {
+
+        // ------- SAVE DATA COMMITMENT TO STATE
+
+        uint256 initialValsetNonce = 1;
+        // Data root tuple root nonce.
+        uint256 nonce = 2;
+        // Commitment to a set of roots.
+        // These values were generated using the tendermint implementation of binary merkle trees:
+        // https://github.com/celestiaorg/celestia-core/blob/60310e7aa554bb76b735a010847a6613bcfe06e8/crypto/merkle/proof.go#L33-L48
+
+        // start block = 730000
+        // end block = 730002 [End not inclusive]
+        // use <CELESTIA_RPC_URL>/data_commitment?start=730000&end=730002, paste the result
+        bytes32 newTupleRoot = 0x8AF495FAB8BD29AA07E806D9E25AE78DED22516BADC8FE0B800B76E0163C3364;
+        bytes32 newDataRootTupleRoot = domainSeparateDataRootTupleRoot(nonce, newTupleRoot);
+
+        // Signature for the update.
+        Signature[] memory sigs = new Signature[](1);
+        bytes32 digest_eip191 = ECDSA.toEthSignedMessageHash(newDataRootTupleRoot);
+        (uint8 v, bytes32 r, bytes32 s) = cheats.sign(testPriv1, digest_eip191);
+        sigs[0] = Signature(v, r, s);
+
+        Validator[] memory valSet = new Validator[](1);
+        valSet[0] = Validator(cheats.addr(testPriv1), votingPower);
+
+        bridge.submitDataRootTupleRoot(nonce, initialValsetNonce, newTupleRoot, valSet, sigs);
+
+        assertEq(bridge.state_eventNonce(), nonce);
+        assertEq(bridge.state_dataRootTupleRoots(nonce), newTupleRoot);
+        
+        // ------- VERIFY DATA HASH BY USER
+
+        bytes32[] memory sideNodes = new bytes32[](1);
+        // Block 730000 
+        // Use <CELESTIA_RPC_URL>/block?height=730000, and get the data_hash
+        sideNodes[0] = sha256(abi.encodePacked(
+            bytes1(0x00), // LEAF_PREFIX
+            abi.encode(DataRootTuple(730000, 0xB8161C61B8EBBB0AFEDD2FF4921AA839CEA998BE6F202052057A7286D1FF0A67))
+            )
+        );
+
+        BinaryMerkleProof memory newTupleProof;
+        newTupleProof.sideNodes = sideNodes;
+        newTupleProof.key = 1;
+        newTupleProof.numLeaves = 2;
+
+        DataRootTuple memory dataTupleToProve = DataRootTuple(730001, 0xC77FB831EBF94EB7AE9323EBD30609EE89F79918B5A532D580894A31A8CFBF37);
+        assertTrue(bridge.verifyAttestation(nonce, dataTupleToProve, newTupleProof));
+    }
+
     function computeValidatorSetHash(Validator[] memory _validators) private pure returns (bytes32) {
         return keccak256(abi.encode(_validators));
     }
@@ -197,4 +247,5 @@ contract RelayerTest is DSTest {
 
         return c;
     }
+
 }
